@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tick Compare — 28 Pairs · Deriv Live · UTC Day</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 100%; height: 100%;
+  background: #000432;
+  font-family: 'Courier New', monospace;
+  overflow: hidden;
+}
+#terminal {
+  width: 100vw; height: 100vh;
+  display: flex; flex-direction: column;
+  background: #000432;
+}
+#header {
+  background: #0d1420;
+  border-bottom: 1px solid #1a2a3a;
+  padding: 0 14px;
+  display: flex; align-items: center; gap: 14px;
+  height: 30px; flex-shrink: 0;
+}
+#hdr-title { color: #4a9eff; font-size: 11px; font-weight: 700; letter-spacing: 2px; white-space: nowrap; }
+#hdr-sub   { color: #2a3d52; font-size: 10px; white-space: nowrap; }
+#hdr-right { margin-left: auto; display: flex; gap: 14px; align-items: center; }
+.live-dot  { width: 6px; height: 6px; border-radius: 50%; background: #666; flex-shrink: 0; }
+.live-dot.on { background: #22cc66; animation: blink 2s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.hdr-meta { font-size: 10px; color: #2a3d52; white-space: nowrap; }
+#conn-status { font-size: 10px; color: #556; }
+#backfill-status { font-size: 10px; color: #ffaa00; }
+
+#legend-bar {
+  background: #080d17;
+  border-bottom: 1px solid #111d2a;
+  padding: 0 14px;
+  display: flex; gap: 14px; align-items: center;
+  height: 26px; flex-shrink: 0; overflow-x: auto; overflow-y: hidden;
+}
+#legend-bar::-webkit-scrollbar { height: 2px; }
+#legend-bar::-webkit-scrollbar-thumb { background: #1a2a3a; }
+.leg { display: flex; align-items: center; gap: 4px; white-space: nowrap; flex-shrink: 0; }
+.leg-line  { width: 14px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+.leg-name  { font-size: 9px; font-weight: 700; }
+.leg-px    { font-size: 9px; color: #334455; margin-left: 1px; }
+.leg-pct   { font-size: 9px; }
+
+#timer-bar {
+  background: #070b12;
+  padding: 2px 14px;
+  display: flex; align-items: center; gap: 10px;
+  height: 14px; flex-shrink: 0;
+}
+#timer-track { flex: 1; height: 2px; background: #0f1c2a; border-radius: 1px; overflow: hidden; }
+#timer-fill  { height: 100%; width: 0%; background: #4a9eff; border-radius: 1px; transition: width .3s linear; }
+#timer-txt   { font-size: 9px; color: #2a3d52; min-width: 90px; text-align: right; }
+
+#chart-wrap { flex: 1; position: relative; min-height: 0; }
+canvas { position: absolute; top: 0; left: 0; }
+#reset-badge {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%,-50%);
+  background: rgba(7,11,18,0.96);
+  border: 1px solid #2a4a7a;
+  color: #4a9eff; font-size: 13px; font-weight: 700;
+  padding: 10px 28px; border-radius: 4px;
+  display: none; letter-spacing: 2px; z-index: 10;
+}
+#footer {
+  background: #06090f;
+  border-top: 1px solid #111d2a;
+  padding: 0 14px;
+  display: flex; gap: 20px; align-items: center;
+  height: 22px; flex-shrink: 0;
+}
+.fi   { font-size: 9px; color: #2a3d52; white-space: nowrap; }
+.fi b { color: #3a5570; }
+</style>
+</head>
+<body>
+<div id="terminal">
+  <div id="header">
+    <div id="hdr-title">▌MULTI-PAIR TICK COMPARE</div>
+    <div id="hdr-sub">28 Pairs (26 FX + XAG + XAU + BTC + ETH) · Deriv Live · UTC day · 5s buckets · normalized from 00:00 UTC open</div>
+    <div id="hdr-right">
+      <div class="live-dot" id="live-dot"></div>
+      <div class="hdr-meta" id="hdr-time">--:--:--</div>
+      <div class="hdr-meta" id="conn-status">Connecting…</div>
+      <div class="hdr-meta" id="backfill-status"></div>
+      <div class="hdr-meta" id="cycle-lbl">Day 1</div>
+    </div>
+  </div>
+  <div id="legend-bar"></div>
+  <div id="timer-bar">
+    <div id="timer-track"><div id="timer-fill"></div></div>
+    <div id="timer-txt">00:00:00 / 24:00:00</div>
+  </div>
+  <div id="chart-wrap">
+    <canvas id="chart"></canvas>
+    <div id="reset-badge">↺ NEW UTC DAY…</div>
+  </div>
+  <div id="footer">
+    <div class="fi">MODE: <b>NORMALIZED %Δ FROM 00:00 UTC OPEN</b></div>
+    <div class="fi" id="f-leader">LEADER: <b>—</b></div>
+    <div class="fi" id="f-laggard">LAGGARD: <b>—</b></div>
+    <div class="fi" style="margin-left:auto" id="f-points">BUCKETS: <b>—</b></div>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════
+   CONFIG
+═══════════════════════════════════════════════ */
+const WS_URL = 'wss://ws.derivws.com/websockets/v3?app_id=1089';
+
+const PAIRS = [
+  { label:'AUD/CAD', sym:'frxAUDCAD', color:'#00ff88' },
+  { label:'AUD/CHF', sym:'frxAUDCHF', color:'#ffe033' },
+  { label:'AUD/JPY', sym:'frxAUDJPY', color:'#00eeff' },
+  { label:'AUD/NZD', sym:'frxAUDNZD', color:'#ff9500' },
+  { label:'AUD/USD', sym:'frxAUDUSD', color:'#cc88ff' },
+  { label:'EUR/AUD', sym:'frxEURAUD', color:'#ffcc00' },
+  { label:'EUR/CAD', sym:'frxEURCAD', color:'#8899ff' },
+  { label:'EUR/CHF', sym:'frxEURCHF', color:'#00ffcc' },
+  { label:'EUR/GBP', sym:'frxEURGBP', color:'#44bbff' },
+  { label:'EUR/JPY', sym:'frxEURJPY', color:'#ff44cc' },
+  { label:'EUR/NZD', sym:'frxEURNZD', color:'#33ff66' },
+  { label:'EUR/USD', sym:'frxEURUSD', color:'#3399ff' },
+  { label:'GBP/AUD', sym:'frxGBPAUD', color:'#dd66ff' },
+  { label:'GBP/CAD', sym:'frxGBPCAD', color:'#ccff00' },
+  { label:'GBP/CHF', sym:'frxGBPCHF', color:'#00ccff' },
+  { label:'GBP/JPY', sym:'frxGBPJPY', color:'#ff4444' },
+  { label:'GBP/NZD', sym:'frxGBPNZD', color:'#ff6688' },
+  { label:'GBP/USD', sym:'frxGBPUSD', color:'#00ff99' },
+  { label:'NZD/JPY', sym:'frxNZDJPY', color:'#44ffbb' },
+  { label:'NZD/USD', sym:'frxNZDUSD', color:'#ff7722' },
+  { label:'USD/CAD', sym:'frxUSDCAD', color:'#00ffaa' },
+  { label:'USD/CHF', sym:'frxUSDCHF', color:'#ff2244' },
+  { label:'USD/JPY', sym:'frxUSDJPY', color:'#ffaa00' },
+  { label:'USD/NOK', sym:'frxUSDNOK', color:'#ff00ff' },
+  { label:'XAG/USD', sym:'frxXAGUSD', color:'#eef0ff' },
+  { label:'XAU/USD', sym:'frxXAUUSD', color:'#ffdd44' },
+  { label:'BTC/USD', sym:'cryBTCUSD', color:'#ff8800' },
+  { label:'ETH/USD', sym:'cryETHUSD', color:'#9988ff' },
+];
+
+const DAY_SECONDS      = 86400;     // full UTC day
+const BUCKET_SECONDS   = 5;         // per-node resolution
+const BUCKETS_PER_DAY  = DAY_SECONDS / BUCKET_SECONDS; // 17280
+const HISTORY_PAGE_SZ  = 5000;      // Deriv ticks_history safe max count per request
+const MAX_LIVE_MARKERS = 6;         // only draw circle markers on the most recent N buckets per pair
+
+const PAD = { l: 4, r: 90, t: 4, b: 4 };
+
+/* ═══════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════ */
+const canvas = document.getElementById('chart');
+const ctx    = canvas.getContext('2d');
+let W = 0, H = 0;
+
+let dayNum    = 1;
+let dayOpenMs = null;     // epoch ms of today's 00:00 UTC
+let resetting = false;
+let wsReady   = false;
+let lastElapsed = 0;
+
+// Per-pair runtime. buckets is a sparse Map: bucketIndex -> { elapsed, pct }
+const pairData = PAIRS.map(p => ({
+  ...p,
+  buckets    : new Map(),
+  bucketKeys : [],      // sorted list of filled bucket indices, maintained incrementally
+  open       : null,    // first price seen at/after today's 00:00 UTC
+  price      : null,
+  lastBucketIdx: -1,
+  backfilled : false,
+}));
+
+const symToIdx = {};
+PAIRS.forEach((p, i) => { symToIdx[p.sym] = i; });
+
+/* ═══════════════════════════════════════════════
+   UTC DAY HELPERS
+   Date.now() % 86400000 gives ms-since-midnight directly,
+   because the Unix epoch itself is a UTC midnight — no
+   timezone math needed, and it self-corrects every frame
+   even if the tab was throttled/backgrounded.
+═══════════════════════════════════════════════ */
+function getTodayMidnightMs() {
+  const now = Date.now();
+  return now - (now % 86400000);
+}
+function getElapsedSec() {
+  return (Date.now() % 86400000) / 1000;
+}
+function bucketIndexFor(elapsedSec) {
+  return Math.min(BUCKETS_PER_DAY - 1, Math.floor(elapsedSec / BUCKET_SECONDS));
+}
+
+/* ═══════════════════════════════════════════════
+   LEGEND
+═══════════════════════════════════════════════ */
+const legendBar = document.getElementById('legend-bar');
+pairData.forEach(p => {
+  const d = document.createElement('div');
+  d.className = 'leg';
+  d.innerHTML =
+    `<div class="leg-line" style="background:${p.color}"></div>`+
+    `<span class="leg-name" style="color:${p.color}">${p.label}</span>`+
+    `<span class="leg-px"  id="lp-${p.label}">-</span>`+
+    `<span class="leg-pct" id="ld-${p.label}" style="color:#445566">—</span>`;
+  legendBar.appendChild(d);
+});
+
+/* ═══════════════════════════════════════════════
+   BUCKET INSERT (shared by backfill + live)
+═══════════════════════════════════════════════ */
+function insertTick(p, epochMs, price) {
+  if (p.open === null) p.open = price;
+  p.price = price;
+
+  const elapsed = (epochMs - dayOpenMs) / 1000;
+  if (elapsed < 0 || elapsed >= DAY_SECONDS) return; // outside today's UTC window
+
+  const idx = bucketIndexFor(elapsed);
+  const pct = (price - p.open) / p.open * 100;
+
+  if (!p.buckets.has(idx)) p.bucketKeys.push(idx);
+  p.buckets.set(idx, { elapsed, pct });
+  p.lastBucketIdx = idx;
+}
+
+function finalizeBucketKeys(p) {
+  p.bucketKeys.sort((a, b) => a - b);
+}
+
+/* ═══════════════════════════════════════════════
+   DERIV WEBSOCKET
+═══════════════════════════════════════════════ */
+let ws = null;
+const reqIdToSym = {}; // req_id -> { sym, idx }
+let nextReqId = 1;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    wsReady = true;
+    document.getElementById('conn-status').textContent = 'Connected';
+    document.getElementById('live-dot').classList.add('on');
+    dayOpenMs = getTodayMidnightMs();
+    startBackfillThenSubscribe();
+  };
+
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.msg_type === 'tick') {
+      handleLiveTick(msg.tick);
+    } else if (msg.msg_type === 'history') {
+      handleHistoryPage(msg);
+    }
+    // subscription errors / rate limits are ignored silently to keep stream alive
+  };
+
+  ws.onerror = () => {
+    document.getElementById('conn-status').textContent = 'Error — retrying…';
+    document.getElementById('live-dot').classList.remove('on');
+  };
+
+  ws.onclose = () => {
+    wsReady = false;
+    document.getElementById('conn-status').textContent = 'Disconnected — retrying…';
+    document.getElementById('live-dot').classList.remove('on');
+    setTimeout(connect, 3000);
+  };
+}
+
+/* ─── Backfill: paginated ticks_history per pair, staggered ─── */
+let backfillQueue = [];
+let backfillActive = 0;
+const BACKFILL_CONCURRENCY = 3; // a few in flight at once, not all 28 simultaneously
+
+function startBackfillThenSubscribe() {
+  document.getElementById('backfill-status').textContent = 'Backfilling 00:00 UTC → now…';
+  backfillQueue = pairData.map((p, i) => ({ idx: i, cursorStartSec: Math.floor(dayOpenMs / 1000) }));
+  backfillActive = 0;
+  pumpBackfillQueue();
+}
+
+function pumpBackfillQueue() {
+  while (backfillActive < BACKFILL_CONCURRENCY && backfillQueue.length > 0) {
+    const job = backfillQueue.shift();
+    backfillActive++;
+    requestHistoryPage(job);
+  }
+  if (backfillQueue.length === 0 && backfillActive === 0) {
+    document.getElementById('backfill-status').textContent = '';
+    pairData.forEach(finalizeBucketKeys);
+    subscribeAllLive();
+  }
+}
+
+function requestHistoryPage(job) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { backfillActive--; pumpBackfillQueue(); return; }
+  const p = pairData[job.idx];
+  const reqId = nextReqId++;
+  reqIdToSym[reqId] = job;
+  ws.send(JSON.stringify({
+    ticks_history: p.sym,
+    start: job.cursorStartSec,
+    end: 'latest',
+    style: 'ticks',
+    count: HISTORY_PAGE_SZ,
+    adjust_start_time: 1,
+    subscribe: 0,
+    req_id: reqId
+  }));
+}
+
+function handleHistoryPage(msg) {
+  const job = reqIdToSym[msg.req_id];
+  if (!job) return;
+  delete reqIdToSym[msg.req_id];
+
+  const p = pairData[job.idx];
+  const hist = msg.history;
+  if (hist && hist.prices && hist.times && hist.prices.length) {
+    const prices = hist.prices, times = hist.times;
+    for (let i = 0; i < prices.length; i++) {
+      insertTick(p, times[i] * 1000, prices[i]);
+    }
+    const lastTime = times[times.length - 1];
+    const reachedNow = (Date.now() / 1000 - lastTime) < (HISTORY_PAGE_SZ > prices.length ? 0 : 2);
+    // If we got a full page, there may be more ticks between lastTime and now — page forward.
+    if (prices.length >= HISTORY_PAGE_SZ) {
+      backfillQueue.push({ idx: job.idx, cursorStartSec: lastTime + 1 });
+    }
+  }
+  p.backfilled = true;
+  backfillActive--;
+  pumpBackfillQueue();
+}
+
+/* ─── Live subscription (after backfill catches each pair up) ─── */
+let liveSubIndex = 0;
+function subscribeAllLive() {
+  liveSubIndex = 0;
+  subscribeNextLive();
+}
+function subscribeNextLive() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (liveSubIndex >= PAIRS.length) return;
+  const sym = PAIRS[liveSubIndex].sym;
+  ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+  liveSubIndex++;
+  if (liveSubIndex < PAIRS.length) setTimeout(subscribeNextLive, 60);
+}
+
+function unsubscribeAll() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ forget_all: 'ticks' }));
+  }
+}
+
+function handleLiveTick(tick) {
+  const idx = symToIdx[tick.symbol];
+  if (idx === undefined || resetting) return;
+  const p = pairData[idx];
+
+  insertTick(p, tick.epoch * 1000, tick.quote);
+  finalizeBucketKeys(p); // cheap: usually appending at the end, sort is near-sorted
+
+  const elPx  = document.getElementById('lp-' + p.label);
+  const elPct = document.getElementById('ld-' + p.label);
+  const last  = p.buckets.get(p.lastBucketIdx);
+  if (elPx)  elPx.textContent  = p.price.toFixed(p.price > 10 ? 3 : 5);
+  if (elPct && last) {
+    elPct.textContent = (last.pct >= 0 ? '+' : '') + last.pct.toFixed(3) + '%';
+    elPct.style.color = last.pct >= 0 ? '#22cc66' : '#ee4444';
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   RESET — fires on UTC midnight rollover
+═══════════════════════════════════════════════ */
+function resetDay() {
+  resetting = true;
+  document.getElementById('reset-badge').style.display = 'block';
+  unsubscribeAll();
+  setTimeout(() => {
+    dayNum++;
+    dayOpenMs = getTodayMidnightMs();
+    document.getElementById('cycle-lbl').textContent = 'Day ' + dayNum;
+    pairData.forEach(p => {
+      p.buckets = new Map();
+      p.bucketKeys = [];
+      p.open = null;
+      p.price = null;
+      p.lastBucketIdx = -1;
+      p.backfilled = false;
+    });
+    resetting = false;
+    document.getElementById('reset-badge').style.display = 'none';
+    startBackfillThenSubscribe();
+  }, 800);
+}
+
+/* ═══════════════════════════════════════════════
+   Y RANGE
+═══════════════════════════════════════════════ */
+function getRange() {
+  let lo = 0, hi = 0;
+  pairData.forEach(p => {
+    p.bucketKeys.forEach(k => {
+      const tk = p.buckets.get(k);
+      if (tk.pct < lo) lo = tk.pct;
+      if (tk.pct > hi) hi = tk.pct;
+    });
+  });
+  const half = Math.max(Math.abs(lo), Math.abs(hi), 0.01);
+  const pad  = half * 0.22 + 0.005;
+  return { lo: -(half + pad), hi: half + pad };
+}
+
+/* ═══════════════════════════════════════════════
+   COORDINATE MAP — DAY_SECONDS wide, so per-tick
+   nodes compress automatically to fit one screen
+═══════════════════════════════════════════════ */
+function chartRight() { return W - PAD.r; }
+function mapX(elapsedSec) {
+  const clamped = Math.max(0, Math.min(elapsedSec, DAY_SECONDS));
+  return PAD.l + (clamped / DAY_SECONDS) * (chartRight() - PAD.l);
+}
+function mapY(pct, lo, hi) {
+  const cH = H - PAD.t - PAD.b;
+  return PAD.t + cH - ((pct - lo) / (hi - lo)) * cH;
+}
+
+/* ═══════════════════════════════════════════════
+   DRAW
+═══════════════════════════════════════════════ */
+function draw() {
+  if (!W || !H) return;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#000432';
+  ctx.fillRect(0, 0, W, H);
+
+  const { lo, hi } = getRange();
+  const cR = chartRight();
+
+  // --- Zero line ---
+  const zeroY = mapY(0, lo, hi);
+  ctx.strokeStyle = '#ff0000';
+  ctx.lineWidth   = 2;
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(PAD.l, zeroY); ctx.lineTo(W - 2, zeroY); ctx.stroke();
+
+  let totalBuckets = 0;
+
+  // --- Pair lines: stroke only, no per-point markers (cost control at 17k pts/day) ---
+  pairData.forEach(p => {
+    totalBuckets += p.bucketKeys.length;
+    if (p.bucketKeys.length < 2) return;
+
+    const path = new Path2D();
+    p.bucketKeys.forEach((k, i) => {
+      const tk = p.buckets.get(k);
+      const x = mapX(tk.elapsed);
+      const y = mapY(tk.pct, lo, hi);
+      i === 0 ? path.moveTo(x, y) : path.lineTo(x, y);
+    });
+
+    ctx.lineJoin    = 'round';
+    ctx.lineCap     = 'round';
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur  = 0;
+    ctx.globalAlpha = 0.85;
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth   = 1.3;
+    ctx.stroke(path);
+    ctx.globalAlpha = 1;
+
+    // Markers only on the most recent few buckets — keeps live tip visible
+    // without paying arc() cost for thousands of historical points.
+    ctx.fillStyle = p.color;
+    const recentKeys = p.bucketKeys.slice(-MAX_LIVE_MARKERS);
+    recentKeys.forEach(k => {
+      const tk = p.buckets.get(k);
+      const x = mapX(tk.elapsed);
+      const y = mapY(tk.pct, lo, hi);
+      ctx.beginPath();
+      ctx.arc(x, y, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  });
+
+  document.getElementById('f-points').innerHTML = 'BUCKETS: <b>' + totalBuckets.toLocaleString() + '</b>';
+
+  // --- End-of-line labels ---
+  ctx.font      = 'bold 11px Courier New';
+  ctx.textAlign = 'left';
+  const LGAP   = 14;
+  const LSPACE = 15;
+
+  const labels = pairData
+    .filter(p => p.bucketKeys.length >= 1)
+    .map(p => {
+      const lastK = p.bucketKeys[p.bucketKeys.length - 1];
+      const last  = p.buckets.get(lastK);
+      return { p, tipX: mapX(last.elapsed), rawY: mapY(last.pct, lo, hi), last };
+    })
+    .sort((a, b) => a.rawY - b.rawY);
+
+  for (let i = 1; i < labels.length; i++) {
+    if (labels[i].rawY - labels[i-1].rawY < LSPACE)
+      labels[i].rawY = labels[i-1].rawY + LSPACE;
+  }
+  for (let i = labels.length - 2; i >= 0; i--) {
+    if (labels[i+1].rawY - labels[i].rawY < LSPACE)
+      labels[i].rawY = labels[i+1].rawY - LSPACE;
+  }
+
+  labels.forEach(({ p, tipX, rawY, last }) => {
+    const lx = tipX + LGAP;
+    const ly = Math.max(PAD.t + 6, Math.min(H - PAD.b - 2, rawY));
+    const clampedTipY = Math.max(PAD.t + 6, Math.min(H - PAD.b - 2, mapY(last.pct, lo, hi)));
+
+    ctx.save();
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth   = 0.8;
+    ctx.globalAlpha = 0.9;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(tipX, clampedTipY);
+    ctx.lineTo(lx - 2, ly);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.font = 'bold 11px Courier New';
+    const tw2 = ctx.measureText(p.label).width;
+    ctx.fillStyle = 'rgba(0,2,30,0.97)';
+    ctx.fillRect(lx - 3, ly - 12, tw2 + 7, 18);
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillText(p.label, lx + 0.7, ly + 1.7);
+    ctx.fillStyle = p.color;
+    ctx.fillText(p.label, lx, ly + 1);
+  });
+
+  // --- Border ---
+  ctx.save();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth   = 2;
+  ctx.strokeRect(1.5, 1.5, W - 3, H - 3);
+  ctx.restore();
+}
+
+function fmtHMS(sec) {
+  const h = String(Math.floor(sec / 3600)).padStart(2,'0');
+  const m = String(Math.floor((sec % 3600) / 60)).padStart(2,'0');
+  const s = String(Math.floor(sec % 60)).padStart(2,'0');
+  return h + ':' + m + ':' + s;
+}
+
+function updateTimerUI() {
+  const elapsed = getElapsedSec();
+  document.getElementById('timer-fill').style.width = (elapsed / DAY_SECONDS * 100) + '%';
+  document.getElementById('timer-txt').textContent  = fmtHMS(elapsed) + ' / 24:00:00';
+  document.getElementById('hdr-time').textContent   = new Date().toUTCString().slice(17, 25) + ' UTC';
+
+  // Detect UTC midnight rollover: elapsed wraps from ~86399 back to ~0
+  if (elapsed < lastElapsed - 1 && !resetting) {
+    resetDay();
+  }
+  lastElapsed = elapsed;
+}
+
+/* ═══════════════════════════════════════════════
+   RESIZE + LOOP
+═══════════════════════════════════════════════ */
+function resize() {
+  const wrap = document.getElementById('chart-wrap');
+  const w = wrap.offsetWidth;
+  const h = wrap.offsetHeight;
+  if (w > 0 && h > 0 && (W !== w || H !== h)) {
+    W = w; H = h;
+    canvas.width  = W;
+    canvas.height = H;
+    canvas.style.width  = W + 'px';
+    canvas.style.height = H + 'px';
+  }
+}
+
+function loop() {
+  resize();
+  draw();
+  updateTimerUI();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', resize);
+setTimeout(() => {
+  resize();
+  lastElapsed = getElapsedSec();
+  connect();
+  requestAnimationFrame(loop);
+}, 50);
+</script>
+</body>
+</html>
